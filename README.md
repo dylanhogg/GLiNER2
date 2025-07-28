@@ -7,7 +7,7 @@
 
 > *Extract entities, classify text, and parse structured data—all in one efficient model.*
 
-GLiNER2 revolutionizes information extraction by unifying **Named Entity Recognition**, **Text Classification**, and **Structured Data Extraction** into a single 205M parameter model. Get production-ready results on CPU without complex pipelines or external APIs.
+GLiNER2 unifies **Named Entity Recognition**, **Text Classification**, and **Structured Data Extraction** into a single 205M parameter model. It provides efficient CPU-based inference without requiring complex pipelines or external API dependencies.
 
 ## ✨ Why GLiNER2?
 
@@ -35,6 +35,15 @@ result = extractor.extract_entities(text, ["company", "person", "product", "loca
 print(result)
 # {'entities': {'company': ['Apple'], 'person': ['Tim Cook'], 'product': ['iPhone 15'], 'location': ['Cupertino']}}
 ```
+
+## 📦 Available Models
+
+| Model | Parameters | Description | Use Case                                         |
+|-------|------------|-------------|--------------------------------------------------|
+| `fastino/gliner2-base-0207` | 205M | base size   | Extraction / classification |
+| `fastino/gliner2-large-1006` | 340M | large size  | Extraction / classification                      |
+
+All models are available on [Hugging Face Hub](https://huggingface.co/fastino) and support the same API.
 
 ## 🎯 Core Capabilities
 
