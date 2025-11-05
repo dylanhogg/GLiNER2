@@ -42,7 +42,7 @@ print(result)
 | `fastino/gliner2-base-v1` | 205M | base size   | Extraction / classification |
 | `fastino/gliner2-large-v1` | 340M | large size  | Extraction / classification                      |
 
-All models are available on [Hugging Face Hub](https://huggingface.co/fastino) and support the same API.
+The models are available on [Hugging Face](https://huggingface.co/collections/fastino/gliner2).
 
 ## 🎯 Core Capabilities
 
