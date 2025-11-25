@@ -14,8 +14,8 @@ dependencies = [
     "typer>=0.20.0",
 ]
 
-[tool.uv]
-dev-dependencies = ["black>=25.11.0", "pytest>=9.0.1", "ruff>=0.14.6"]
+[dependency-groups]
+dev = ["black>=25.11.0", "pytest>=9.0.1", "ruff>=0.14.6"]
 
 [tool.uv.sources]
 gliner2 = { path = "../", editable = true }
