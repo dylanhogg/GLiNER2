@@ -50,12 +50,15 @@ import hashlib
 import json
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union, Tuple
+from typing import Any, Dict, List, Optional, Union, Tuple, TYPE_CHECKING
 from typing import Pattern, Literal
 
 import torch
 import torch.nn.functional as F
 from gliner2.model import Extractor
+
+if TYPE_CHECKING:
+    from gliner2.api_client import GLiNER2API
 
 
 @dataclass
@@ -224,14 +227,17 @@ class Schema:
             "json_structures": [],
             "classifications": [],
             "entities": OrderedDict(),  # Preserve entity order
+            "relations": [],  # Relations list
             "json_descriptions": {},
             "entity_descriptions": OrderedDict()  # Preserve description order
         }
         # Store metadata for thresholds and types
         self._field_metadata = {}  # "parent.field" -> {dtype, threshold, choices, validators}
         self._entity_metadata = {}  # "entity_name" -> {dtype, threshold}
+        self._relation_metadata = {}  # "relation_name" -> {threshold}
         self._field_orders = {}  # "parent" -> [field1, field2, ...]
         self._entity_order = []  # [entity1, entity2, ...]
+        self._relation_order = []  # [relation1, relation2, ...]
         self._active_structure_builder = None  # Track active structure builder
 
     def _store_field_metadata(self, parent: str, field: str, dtype: str, threshold: Optional[float],
@@ -439,6 +445,94 @@ class Schema:
         else:
             raise ValueError("Invalid entity_types format")
 
+    def relations(
+            self,
+            relation_types: Union[str, List[str], Dict[str, Union[str, Dict]]],
+            threshold: Optional[float] = None
+    ) -> 'Schema':
+        """
+        Add relation extraction task.
+
+        This method configures extraction of relations between entities in the text.
+        Relations automatically use "head" and "tail" fields which are handled
+        by the backend processor.
+
+        Parameters
+        ----------
+        relation_types : str, List[str], or Dict[str, Union[str, Dict]]
+            Relation types to extract. Can be:
+            - str: Single relation type
+            - List[str]: Multiple relation types
+            - Dict[str, str]: Relation types with descriptions
+            - Dict[str, Dict]: Relation types with full configuration
+              (including threshold, description)
+        threshold : float, optional
+            Default confidence threshold for relation extraction (0-1).
+            Individual relations can override this.
+
+        Returns
+        -------
+        Schema
+            Returns self for method chaining.
+
+        Examples
+        --------
+        >>> schema = extractor.create_schema()
+        >>> schema.relations(["works_for", "located_in"])
+        >>> schema.relations({"works_for": {"threshold": 0.6}, "located_in": "A location relation"})
+        """
+        # Auto-finish any active structure builder
+        if self._active_structure_builder:
+            self._active_structure_builder._auto_finish()
+            self._active_structure_builder = None
+
+        # Parse relation types similar to entities
+        if isinstance(relation_types, str):
+            relations = {relation_types: {}}
+        elif isinstance(relation_types, list):
+            relations = {name: {} for name in relation_types}
+        elif isinstance(relation_types, dict):
+            relations = {}
+            for name, config in relation_types.items():
+                if isinstance(config, str):
+                    relations[name] = {"description": config}
+                elif isinstance(config, dict):
+                    relations[name] = config
+                else:
+                    relations[name] = {}
+        else:
+            raise ValueError("Invalid relation_types format")
+
+        for relation_name, config in relations.items():
+            # Relations use standard "head" and "tail" fields
+            relation_config = {"head": "", "tail": ""}
+            self.schema["relations"].append({relation_name: relation_config})
+
+            # Only add to order if not already present
+            if relation_name not in self._relation_order:
+                self._relation_order.append(relation_name)
+
+            # Store field order for relations (head and tail)
+            self._field_orders[relation_name] = ["head", "tail"]
+
+            # Get configuration
+            relation_threshold = config.get("threshold", threshold)
+            description = config.get("description")
+
+            # Store metadata
+            if relation_threshold is not None:
+                if not 0 <= relation_threshold <= 1:
+                    raise ValueError(f"Threshold must be between 0 and 1, got {relation_threshold}")
+            self._relation_metadata[relation_name] = {"threshold": relation_threshold}
+
+            # Store description if provided (for future use)
+            if description:
+                if "relation_descriptions" not in self.schema:
+                    self.schema["relation_descriptions"] = OrderedDict()
+                self.schema["relation_descriptions"][relation_name] = description
+
+        return self
+
     def build(self) -> Dict[str, Any]:
         """
         Build the final schema dictionary.
@@ -498,6 +592,9 @@ class GLiNER2(Extractor):
     >>> # Load pre-trained model
     >>> extractor = GLiNER2.from_pretrained("your-model")
     >>>
+    >>> # Or load from API (no local model needed)
+    >>> extractor = GLiNER2.from_api()
+    >>>
     >>> # Simple entity extraction
     >>> results = extractor.extract_entities(
     ...     "Apple Inc. announced new products in California.",
@@ -530,6 +627,83 @@ class GLiNER2(Extractor):
         self._schema_cache = {}
         # Cache for entity encodings
         self._encoding_cache = {}
+    
+    @classmethod
+    def from_api(
+        cls,
+        api_key: str = None,
+        api_base_url: str = None,
+        timeout: float = 30.0,
+        max_retries: int = 3,
+    ) -> 'GLiNER2API':
+        """
+        Load GLiNER2 from API endpoint instead of local model.
+        
+        This factory method returns an API-based client that provides the same
+        interface as the local model. All inference methods (extract_entities,
+        extract_json, classify_text, etc.) work identically.
+        
+        Parameters
+        ----------
+        api_key : str, optional
+            API authentication key. If not provided, reads from PIONEER_API_KEY
+            environment variable.
+        api_base_url : str, optional
+            Override the default API base URL (https://api.fastino.ai).
+            Can also be set via GLINER2_API_BASE_URL environment variable.
+        timeout : float, default=30.0
+            Request timeout in seconds.
+        max_retries : int, default=3
+            Maximum number of retries for failed requests.
+        
+        Returns
+        -------
+        GLiNER2API
+            API-based client with the same interface as GLiNER2.
+        
+        Raises
+        ------
+        ValueError
+            If no API key is provided and PIONEER_API_KEY is not set.
+        
+        Examples
+        --------
+        >>> # Using environment variable for API key
+        >>> import os
+        >>> os.environ['PIONEER_API_KEY'] = 'your-api-key'
+        >>> extractor = GLiNER2.from_api()
+        >>>
+        >>> # Using explicit API key
+        >>> extractor = GLiNER2.from_api(api_key="your-api-key")
+        >>>
+        >>> # Use exactly like local model
+        >>> results = extractor.extract_entities(
+        ...     "Apple released iPhone 15 in September 2023.",
+        ...     ["company", "product", "date"]
+        ... )
+        
+        Notes
+        -----
+        The API client supports all the same methods as the local model:
+        - extract_entities / batch_extract_entities
+        - extract_json / batch_extract_json
+        - classify_text / batch_classify_text
+        - extract / batch_extract
+        - create_schema
+        
+        The main differences are:
+        - No local GPU/model required
+        - Requires network connectivity and valid API key
+        - Some advanced features (validators, confidence scores) may be limited
+        """
+        from gliner2.api_client import GLiNER2API
+        
+        return GLiNER2API(
+            api_key=api_key,
+            api_base_url=api_base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
 
     def create_schema(self) -> Schema:
         """
@@ -663,8 +837,11 @@ class GLiNER2(Extractor):
             threshold: float,
             field_metadata: Dict[str, Dict],
             entity_metadata: Dict[str, Dict],
+            relation_metadata: Dict[str, Dict],
             field_orders: Dict[str, List[str]],
-            entity_order: List[str]
+            entity_order: List[str],
+            relation_order: List[str],
+            include_confidence: bool = False
     ) -> Dict[str, Any]:
         """
         Extract information from pre-encoded representation.
@@ -709,8 +886,9 @@ class GLiNER2(Extractor):
             else:
                 self._extract_spans(
                     results, schema_name, i, outputs, span_info, record,
-                    threshold, field_metadata, entity_metadata,
-                    field_orders, entity_order, classification_fields
+                    threshold, field_metadata, entity_metadata, relation_metadata,
+                    field_orders, entity_order, relation_order, classification_fields,
+                    include_confidence=include_confidence
                 )
 
         return results
@@ -831,16 +1009,20 @@ class GLiNER2(Extractor):
                 metadata = {
                     "field_metadata": schema._field_metadata,
                     "entity_metadata": schema._entity_metadata,
+                    "relation_metadata": getattr(schema, '_relation_metadata', {}),
                     "field_orders": schema._field_orders,
-                    "entity_order": schema._entity_order
+                    "entity_order": schema._entity_order,
+                    "relation_order": getattr(schema, '_relation_order', [])
                 }
             elif isinstance(schema, dict):
                 schema_dict = schema
                 metadata = {
                     "field_metadata": {},
                     "entity_metadata": {},
+                    "relation_metadata": {},
                     "field_orders": {},
-                    "entity_order": []
+                    "entity_order": [],
+                    "relation_order": []
                 }
             else:
                 raise ValueError(f"Invalid schema type at index {i}")
@@ -915,13 +1097,28 @@ class GLiNER2(Extractor):
                     threshold,
                     metadata["field_metadata"],
                     metadata["entity_metadata"],
+                    metadata.get("relation_metadata", {}),
                     metadata["field_orders"],
-                    metadata["entity_order"]
+                    metadata["entity_order"],
+                    metadata.get("relation_order", []),
+                    include_confidence=include_confidence
                 )
 
                 # Format if requested
                 if format_results:
-                    results = self.format_results(raw_results, include_confidence)
+                    # Get all requested relation types from schema
+                    requested_relations = metadata.get("relation_order", [])
+                    # Also check schema dict for relations if not in metadata
+                    if not requested_relations and "relations" in record["schema"]:
+                        requested_relations = [
+                            list(rel.keys())[0] 
+                            for rel in record["schema"]["relations"]
+                        ]
+                    results = self.format_results(
+                        raw_results, 
+                        include_confidence,
+                        requested_relations=requested_relations if requested_relations else None
+                    )
                 else:
                     results = raw_results
 
@@ -1190,7 +1387,8 @@ class GLiNER2(Extractor):
             field_metadata: Dict[str, Dict],
             entity_metadata: Dict[str, Dict],
             field_orders: Dict[str, List[str]],
-            entity_order: List[str]
+            entity_order: List[str],
+            include_confidence: bool = False
     ) -> Dict[str, Any]:
         """Core extraction pipeline."""
         # Setup model
@@ -1226,8 +1424,9 @@ class GLiNER2(Extractor):
             else:
                 self._extract_spans(
                     results, schema_name, i, outputs, span_info, record,
-                    default_threshold, field_metadata, entity_metadata,
-                    field_orders, entity_order, classification_fields
+                    default_threshold, field_metadata, entity_metadata, {},
+                    field_orders, entity_order, [], classification_fields,
+                    include_confidence=include_confidence
                 )
 
         return results
@@ -1322,11 +1521,14 @@ class GLiNER2(Extractor):
             default_threshold: float,
             field_metadata: Dict,
             entity_metadata: Dict,
+            relation_metadata: Dict,
             field_orders: Dict[str, List[str]],
             entity_order: List[str],
-            classification_fields: Dict[str, List[str]]
+            relation_order: List[str],
+            classification_fields: Dict[str, List[str]],
+            include_confidence: bool = False
     ):
-        """Extract span-based results (entities, structures)."""
+        """Extract span-based results (entities, structures, relations)."""
         # Get basic information
         schema_tokens = outputs["schema_tokens_list"][schema_idx]
         field_names = self._get_field_names(schema_tokens)
@@ -1340,19 +1542,38 @@ class GLiNER2(Extractor):
         count, span_scores = self._predict_spans(embeddings, field_names, span_info)
 
         if count <= 0:
-            results[schema_name] = [] if schema_name == "entities" else {}
+            # For entities, return empty list
+            if schema_name == "entities":
+                results[schema_name] = []
+            elif outputs["task_types"][schema_idx] == "relations":
+                # For relations, add empty list so format_results knows this relation type was requested
+                results[schema_name] = []
+            else:
+                # For structures, return empty dict
+                results[schema_name] = {}
             return
 
         # Extract based on schema type
         if schema_name == "entities":
-            results[schema_name] = self._extract_entity_results(
+            extracted_results = self._extract_entity_results(
                 field_names, span_scores, record, outputs,
-                default_threshold, entity_metadata, entity_order
+                default_threshold, entity_metadata, entity_order,
+                include_confidence=include_confidence
             )
+            results[schema_name] = extracted_results
+        elif outputs["task_types"][schema_idx] == "relations":
+            # Relations are extracted differently - they have head and tail fields
+            extracted_results = self._extract_relation_results(
+                schema_name, field_names, span_scores, count, record, outputs,
+                default_threshold, relation_metadata, field_orders
+            )
+            # Always add to results (empty list if no relations found)
+            results[schema_name] = extracted_results if extracted_results else []
         else:
             results[schema_name] = self._extract_structure_results(
                 schema_name, field_names, span_scores, count, record, outputs,
-                default_threshold, field_metadata, field_orders, classification_fields
+                default_threshold, field_metadata, field_orders, classification_fields,
+                include_confidence=include_confidence
             )
 
     def _get_field_names(self, schema_tokens: List[str]) -> List[str]:
@@ -1391,7 +1612,8 @@ class GLiNER2(Extractor):
             outputs: Dict,
             default_threshold: float,
             entity_metadata: Dict,
-            entity_order: List[str]
+            entity_order: List[str],
+            include_confidence: bool = False
     ) -> List[Dict[str, Any]]:
         """Extract entity results with per-entity thresholds and preserved order."""
         if span_scores is None:
@@ -1425,9 +1647,12 @@ class GLiNER2(Extractor):
 
             # Format results
             if dtype == "list":
-                entity_results[entity_name] = self._format_span_list(spans)
+                entity_results[entity_name] = self._format_span_list(spans, include_confidence)
             else:  # "str"
-                entity_results[entity_name] = spans[0][0] if spans else ""
+                if include_confidence and spans:
+                    entity_results[entity_name] = spans[0]  # Full tuple
+                else:
+                    entity_results[entity_name] = spans[0][0] if spans else ""
 
         return [entity_results] if entity_results else []
 
@@ -1442,7 +1667,8 @@ class GLiNER2(Extractor):
             default_threshold: float,
             field_metadata: Dict,
             field_orders: Dict[str, List[str]],
-            classification_fields: Dict[str, List[str]]
+            classification_fields: Dict[str, List[str]],
+            include_confidence: bool = False
     ) -> List[Dict[str, Any]]:
         """Extract structured data results with per-field thresholds and preserved order."""
         if span_scores is None:
@@ -1550,9 +1776,12 @@ class GLiNER2(Extractor):
                     # Format and store results
                     if spans:
                         if dtype == "list":
-                            instance_data[field_name] = self._format_span_list(spans)
+                            instance_data[field_name] = self._format_span_list(spans, include_confidence)
                         else:  # "str"
-                            instance_data[field_name] = spans[0][0]
+                            if include_confidence:
+                                instance_data[field_name] = spans[0]  # Full tuple
+                            else:
+                                instance_data[field_name] = spans[0][0]
                     else:
                         # Set None for str fields, empty list for list fields
                         if dtype == "list":
@@ -1569,6 +1798,67 @@ class GLiNER2(Extractor):
 
             if has_content:
                 instances.append(instance_data)
+
+        return instances
+
+    def _extract_relation_results(
+            self,
+            schema_name: str,
+            field_names: List[str],
+            span_scores: torch.Tensor,
+            count: int,
+            record: Dict,
+            outputs: Dict,
+            default_threshold: float,
+            relation_metadata: Dict,
+            field_orders: Dict[str, List[str]]
+    ) -> List[Tuple[str, str]]:
+        """Extract relation results as tuples (source, target)."""
+        if span_scores is None:
+            return []
+
+        text_len = len(self.processor.tokenize_text(record["text"]))
+        instances = []
+
+        # Get relation threshold from metadata
+        relation_threshold = default_threshold
+        if schema_name in relation_metadata:
+            rel_meta = relation_metadata[schema_name]
+            if rel_meta.get("threshold") is not None:
+                relation_threshold = rel_meta["threshold"]
+
+        # Get the field order for this relation (typically ["head", "tail"])
+        ordered_fields = field_orders.get(schema_name, field_names)
+
+        for instance_idx in range(count):
+            scores = span_scores[instance_idx, :, -text_len:]
+
+            # Extract head and tail spans
+            extracted_values = []
+
+            # Process fields in the order they were defined (head, tail)
+            for field_name in ordered_fields:
+                if field_name not in field_names:
+                    continue
+
+                field_idx = field_names.index(field_name)
+
+                # Extract spans for this field (head or tail) using relation threshold
+                spans = self._find_valid_spans(
+                    scores[field_idx], relation_threshold, record, outputs, text_len
+                )
+
+                # For relations, we want the best span
+                if spans:
+                    # Take the first (highest confidence) span
+                    extracted_values.append(spans[0][0])
+                else:
+                    extracted_values.append(None)
+
+            # Only add instance if both source and target are present
+            # Order is maintained: first is source (head), second is target (tail)
+            if len(extracted_values) == 2 and extracted_values[0] and extracted_values[1]:
+                instances.append((extracted_values[0], extracted_values[1]))
 
         return instances
 
@@ -1643,8 +1933,26 @@ class GLiNER2(Extractor):
 
         return spans
 
-    def _format_span_list(self, spans: List[Tuple[str, float, int, int]]) -> List[str]:
-        """Format spans into a clean list with proper overlap detection and greedy selection."""
+    def _format_span_list(
+        self, 
+        spans: List[Tuple[str, float, int, int]], 
+        include_confidence: bool = False
+    ) -> Union[List[str], List[Tuple[str, float, int, int]]]:
+        """Format spans into a clean list with proper overlap detection and greedy selection.
+        
+        Parameters
+        ----------
+        spans : List[Tuple[str, float, int, int]]
+            List of (text, confidence, start, end) tuples.
+        include_confidence : bool, default=False
+            If True, returns full tuples with confidence and positions.
+            If False, returns only text strings.
+            
+        Returns
+        -------
+        Union[List[str], List[Tuple[str, float, int, int]]]
+            List of text strings (default) or full tuples if include_confidence=True.
+        """
         if not spans:
             return []
 
@@ -1666,10 +1974,17 @@ class GLiNER2(Extractor):
             if not overlap:
                 selected.append((text, confidence, start, end))
 
-        # Return only the text, maintaining confidence order
+        # Return full tuples if confidence requested, otherwise just text
+        if include_confidence:
+            return selected
         return [text for text, _, _, _ in selected]
 
-    def format_results(self, results: Dict[str, Any], include_confidence: bool = False) -> Dict[str, Any]:
+    def format_results(
+        self, 
+        results: Dict[str, Any], 
+        include_confidence: bool = False,
+        requested_relations: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         """
         Format raw extraction results into clean, user-friendly output.
 
@@ -1678,6 +1993,7 @@ class GLiNER2(Extractor):
         - Simplify confidence score presentation
         - Ensure consistent structure
         - Preserve field ordering
+        - Group relations under 'relation_extraction' key
 
         Parameters
         ----------
@@ -1686,6 +2002,9 @@ class GLiNER2(Extractor):
         include_confidence : bool, default=False
             If True, includes confidence scores in the output.
             If False, returns only the extracted values.
+        requested_relations : List[str], optional
+            List of all relation types that were requested in the schema.
+            If provided, ensures all requested relations appear in output, even if empty.
 
         Returns
         -------
@@ -1693,11 +2012,31 @@ class GLiNER2(Extractor):
             Formatted results with clean structure.
         """
         formatted = {}
+        relations = {}
+        found_relation_keys = set()
 
         for key, value in results.items():
-            if isinstance(value, list) and len(value) > 0:
+            if isinstance(value, list):
+                # Check if this is a relation result (list of tuples or empty list from relations)
+                if len(value) > 0 and isinstance(value[0], tuple) and len(value[0]) == 2:
+                    # This is a relation result with tuples - collect under relations
+                    relations[key] = value
+                    found_relation_keys.add(key)
+                elif len(value) == 0 and key not in formatted:
+                    # Empty list - could be empty relation or empty entity list
+                    # Check if it's a relation by checking requested_relations
+                    if requested_relations and key in requested_relations:
+                        # This is an empty relation
+                        relations[key] = []
+                        found_relation_keys.add(key)
+                    elif key == "entities":
+                        # Empty entity list
+                        formatted[key] = {}
+                    else:
+                        # Other empty lists
+                        formatted[key] = value
                 # Handle entity results (list of dicts)
-                if isinstance(value[0], dict):
+                elif len(value) > 0 and isinstance(value[0], dict):
                     if key == "entities":
                         # Format entities specially
                         formatted[key] = self._format_entities(value[0], include_confidence)
@@ -1730,6 +2069,23 @@ class GLiNER2(Extractor):
                 # Direct value
                 formatted[key] = value
 
+        # Build relation_extraction dictionary
+        relation_extraction = {}
+        
+        # Add found relations (both non-empty and empty)
+        for rel_type, rel_values in relations.items():
+            relation_extraction[rel_type] = rel_values
+        
+        # Add empty lists for requested relations that weren't found in results
+        if requested_relations:
+            for rel_type in requested_relations:
+                if rel_type not in relation_extraction:
+                    relation_extraction[rel_type] = []
+        
+        # Add relation_extraction if we have any relations (found, empty, or requested)
+        if relation_extraction:
+            formatted["relation_extraction"] = relation_extraction
+
         return formatted
 
     def _format_entities(self, entities: Dict[str, Any], include_confidence: bool) -> Dict[str, Any]:
@@ -1741,10 +2097,28 @@ class GLiNER2(Extractor):
                 unique_spans = []
                 seen = set()
                 for span in spans:
-                    if span and span.lower() not in seen:
-                        seen.add(span.lower())
-                        unique_spans.append(span)
+                    # Handle both tuple format (text, conf, start, end) and plain string
+                    if isinstance(span, tuple):
+                        text, conf, start, end = span
+                        if text and text.lower() not in seen:
+                            seen.add(text.lower())
+                            if include_confidence:
+                                unique_spans.append({"text": text, "confidence": conf, "start": start, "end": end})
+                            else:
+                                unique_spans.append(text)
+                    else:
+                        # Plain string
+                        if span and span.lower() not in seen:
+                            seen.add(span.lower())
+                            unique_spans.append(span)
                 formatted[entity_type] = unique_spans
+            elif isinstance(spans, tuple):
+                # Single span with confidence (str type with include_confidence=True)
+                text, conf, start, end = spans
+                if include_confidence:
+                    formatted[entity_type] = {"text": text, "confidence": conf, "start": start, "end": end} if text else None
+                else:
+                    formatted[entity_type] = text if text else None
             else:
                 # Single span (str type)
                 formatted[entity_type] = spans if spans else None
@@ -1759,10 +2133,27 @@ class GLiNER2(Extractor):
                 unique_values = []
                 seen = set()
                 for v in value:
-                    if v and v.lower() not in seen:
-                        seen.add(v.lower())
-                        unique_values.append(v)
+                    # Handle both tuple format (text, conf, start, end) and plain string
+                    if isinstance(v, tuple):
+                        text, conf, start, end = v
+                        if text and text.lower() not in seen:
+                            seen.add(text.lower())
+                            if include_confidence:
+                                unique_values.append({"text": text, "confidence": conf, "start": start, "end": end})
+                            else:
+                                unique_values.append(text)
+                    else:
+                        if v and v.lower() not in seen:
+                            seen.add(v.lower())
+                            unique_values.append(v)
                 formatted[field] = unique_values
+            elif isinstance(value, tuple):
+                # Single value with confidence (str type with include_confidence=True)
+                text, conf, start, end = value
+                if include_confidence:
+                    formatted[field] = {"text": text, "confidence": conf, "start": start, "end": end} if text else None
+                else:
+                    formatted[field] = text if text else None
             elif value:  # Non-empty string
                 formatted[field] = value
             else:
@@ -1902,6 +2293,109 @@ class GLiNER2(Extractor):
 
         # Return the first (and only) result
         return results[0] if results else {}
+
+    def extract_relations(
+            self,
+            text: str,
+            relation_types: Union[str, List[str], Dict[str, Union[str, Dict]]],
+            threshold: float = 0.5,
+            format_results: bool = True,
+            include_confidence: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Quick relation extraction without explicit schema building.
+
+        This is a convenience method for simple relation extraction tasks.
+        Internally creates a schema with only relation extraction.
+
+        Parameters
+        ----------
+        text : str
+            The input text to extract relations from.
+        relation_types : str, List[str], or Dict
+            Relation types to extract (see relations for format details).
+        threshold : float, default=0.5
+            Minimum confidence threshold for relation extraction.
+        format_results : bool, default=True
+            Whether to format the results nicely.
+        include_confidence : bool, default=False
+            Whether to include confidence scores.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary with "relation_extraction" key containing all extracted relations.
+            Relations are grouped by type, with each instance as a tuple (source, target).
+            Format: {"relation_extraction": {"relation_name": [(source, target), ...]}}
+
+        Examples
+        --------
+        >>> results = extractor.extract_relations(
+        ...     "John works for Apple Inc. Mary works for Google.",
+        ...     ["works_for"]
+        ... )
+        >>> # Returns: {"relation_extraction": {"works_for": [("John", "Apple Inc."), ("Mary", "Google")]}}
+        """
+        schema = self.create_schema().relations(relation_types)
+        return self.extract(text, schema, threshold, format_results, include_confidence)
+
+    def batch_extract_relations(
+            self,
+            texts: List[str],
+            relation_types: Union[str, List[str], Dict[str, Union[str, Dict]]],
+            batch_size: int = 8,
+            threshold: float = 0.5,
+            format_results: bool = True,
+            include_confidence: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Batch relation extraction without explicit schema building.
+
+        This is a convenience method for batch processing relation extraction tasks.
+        Internally creates schemas with only relation extraction.
+
+        Parameters
+        ----------
+        texts : List[str]
+            List of texts to extract relations from.
+        relation_types : str, List[str], or Dict
+            Relation types to extract (see relations for format details).
+        batch_size : int, default=8
+            Number of texts to process together.
+        threshold : float, default=0.5
+            Minimum confidence threshold for relation extraction.
+        format_results : bool, default=True
+            Whether to format the results nicely.
+        include_confidence : bool, default=False
+            Whether to include confidence scores.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            List of dictionaries with "relation_extraction" key containing all extracted relations.
+            Relations are grouped by type, with each instance as a tuple (source, target).
+            Format: [{"relation_extraction": {"relation_name": [(source, target), ...]}}]
+
+        Examples
+        --------
+        >>> texts = [
+        ...     "John works for Apple Inc.",
+        ...     "Mary located in New York.",
+        ...     "Bob works for Microsoft."
+        ... ]
+        >>> results = extractor.batch_extract_relations(
+        ...     texts,
+        ...     ["works_for", "located_in"],
+        ...     batch_size=8
+        ... )
+        >>> # Returns: [
+        >>> #     {"relation_extraction": {"works_for": [("John", "Apple Inc.")]}},
+        >>> #     {"relation_extraction": {"located_in": [("Mary", "New York")]}},
+        >>> #     {"relation_extraction": {"works_for": [("Bob", "Microsoft")]}}
+        >>> # ]
+        """
+        schema = self.create_schema().relations(relation_types)
+        return self.batch_extract(texts, schema, batch_size, threshold, format_results, include_confidence)
 
     def _parse_field_spec(self, field_spec: str) -> Tuple[str, str, Optional[List[str]], Optional[str]]:
         """

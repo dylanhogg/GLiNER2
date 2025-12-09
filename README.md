@@ -5,13 +5,13 @@
 [![PyPI version](https://badge.fury.io/py/gliner2.svg)](https://badge.fury.io/py/gliner2)
 [![Downloads](https://pepy.tech/badge/gliner2)](https://pepy.tech/project/gliner2)
 
-> *Extract entities, classify text, and parse structured data—all in one efficient model.*
+> *Extract entities, classify text, parse structured data, and extract relations—all in one efficient model.*
 
-GLiNER2 unifies **Named Entity Recognition**, **Text Classification**, and **Structured Data Extraction** into a single 205M parameter model. It provides efficient CPU-based inference without requiring complex pipelines or external API dependencies.
+GLiNER2 unifies **Named Entity Recognition**, **Text Classification**, **Structured Data Extraction**, and **Relation Extraction** into a single 205M parameter model. It provides efficient CPU-based inference without requiring complex pipelines or external API dependencies.
 
 ## ✨ Why GLiNER2?
 
-- **🎯 One Model, Three Tasks**: Entities, classification, and structured data in a single forward pass
+- **🎯 One Model, Four Tasks**: Entities, classification, structured data, and relations in a single forward pass
 - **💻 CPU First**: Lightning-fast inference on standard hardware—no GPU required
 - **🛡️ Privacy**: 100% local processing, zero external dependencies
 
@@ -35,6 +35,23 @@ print(result)
 # {'entities': {'company': ['Apple'], 'person': ['Tim Cook'], 'product': ['iPhone 15'], 'location': ['Cupertino']}}
 ```
 
+### 🌐 API Access: GLiNER XL 1B
+
+Our biggest and most powerful model—**GLiNER XL 1B**—is available exclusively via API. No GPU required, no model downloads, just instant access to state-of-the-art extraction. Get your API key at [gliner.pioneer.ai](https://gliner.pioneer.ai).
+
+```python
+from gliner2 import GLiNER2
+
+# Access GLiNER XL 1B via API
+extractor = GLiNER2.from_api()  # Uses PIONEER_API_KEY env variable
+
+result = extractor.extract_entities(
+    "OpenAI CEO Sam Altman announced GPT-5 at their San Francisco headquarters.",
+    ["company", "person", "product", "location"]
+)
+# {'entities': {'company': ['OpenAI'], 'person': ['Sam Altman'], 'product': ['GPT-5'], 'location': ['San Francisco']}}
+```
+
 ## 📦 Available Models
 
 | Model | Parameters | Description | Use Case                                         |
@@ -42,7 +59,7 @@ print(result)
 | `fastino/gliner2-base-v1` | 205M | base size   | Extraction / classification |
 | `fastino/gliner2-large-v1` | 340M | large size  | Extraction / classification                      |
 
-The models are available on [Hugging Face](https://huggingface.co/collections/fastino/gliner2).
+The models are available on [Hugging Face](https://huggingface.co/collections/fastino/gliner2-family).
 
 ## 🎯 Core Capabilities
 
@@ -149,7 +166,44 @@ result = extractor.extract_json(
 # }
 ```
 
-### 4. Multi-Task Schema Composition
+### 4. Relation Extraction
+Extract relationships between entities as directional tuples:
+
+```python
+# Basic relation extraction
+text = "John works for Apple Inc. and lives in San Francisco. Apple Inc. is located in Cupertino."
+
+result = extractor.extract_relations(
+    text,
+    ["works_for", "lives_in", "located_in"]
+)
+# Output: {
+#     'relation_extraction': {
+#         'works_for': [('John', 'Apple Inc.')],
+#         'lives_in': [('John', 'San Francisco')],
+#         'located_in': [('Apple Inc.', 'Cupertino')]
+#     }
+# }
+
+# With descriptions for better accuracy
+schema = extractor.create_schema().relations({
+    "works_for": "Employment relationship where person works at organization",
+    "founded": "Founding relationship where person created organization",
+    "acquired": "Acquisition relationship where company bought another company",
+    "located_in": "Geographic relationship where entity is in a location"
+})
+
+text = "Elon Musk founded SpaceX in 2002. SpaceX is located in Hawthorne, California."
+results = extractor.extract(text, schema)
+# Output: {
+#     'relation_extraction': {
+#         'founded': [('Elon Musk', 'SpaceX')],
+#         'located_in': [('SpaceX', 'Hawthorne, California')]
+#     }
+# }
+```
+
+### 5. Multi-Task Schema Composition
 Combine all extraction types when you need comprehensive analysis:
 
 ```python
@@ -166,6 +220,9 @@ schema = (extractor.create_schema()
     .classification("sentiment", ["positive", "negative", "neutral"])
     .classification("category", ["technology", "business", "finance", "healthcare"])
     
+    # Extract relationships
+    .relations(["works_for", "founded", "located_in"])
+    
     # Extract structured product details
     .structure("product_info")
         .field("name", dtype="str")
@@ -175,7 +232,7 @@ schema = (extractor.create_schema()
 )
 
 # Comprehensive extraction in one pass
-text = "Apple CEO Tim Cook unveiled the revolutionary iPhone 15 Pro for $999. The device features an A17 Pro chip and titanium design."
+text = "Apple CEO Tim Cook unveiled the revolutionary iPhone 15 Pro for $999. The device features an A17 Pro chip and titanium design. Tim Cook works for Apple, which is located in Cupertino."
 
 results = extractor.extract(text, schema)
 # Output: {
@@ -185,7 +242,11 @@ results = extractor.extract(text, schema)
 #         'product': ['iPhone 15 Pro']
 #     },
 #     'sentiment': 'positive',
-#     'category': 'technology', 
+#     'category': 'technology',
+#     'relation_extraction': {
+#         'works_for': [('Tim Cook', 'Apple')],
+#         'located_in': [('Apple', 'Cupertino')]
+#     },
 #     'product_info': [{
 #         'name': 'iPhone 15 Pro',
 #         'price': '$999',
@@ -283,6 +344,7 @@ Termination clause: 30-day written notice required.
 schema = (extractor.create_schema()
     .entities(["company", "date", "duration", "fee"])
     .classification("contract_type", ["service", "employment", "nda", "partnership"])
+    .relations(["signed_by", "involves", "dated"])
     .structure("contract_terms")
         .field("parties", dtype="list")
         .field("effective_date", dtype="str")
@@ -301,6 +363,10 @@ results = extractor.extract(contract_text, schema)
 #         'fee': ['$15,000']
 #     },
 #     'contract_type': 'service',
+#     'relation_extraction': {
+#         'involves': [('TechCorp LLC', 'DataSystems Inc.')],
+#         'dated': [('Service Agreement', 'January 1, 2024')]
+#     },
 #     'contract_terms': [{
 #         'parties': ['TechCorp LLC', 'DataSystems Inc.'],
 #         'effective_date': 'January 1, 2024',
@@ -309,6 +375,42 @@ results = extractor.extract(contract_text, schema)
 #         'renewal': 'automatic',
 #         'termination_notice': '30-day written notice'
 #     }]
+# }
+```
+
+### Knowledge Graph Construction
+
+```python
+# Extract entities and relations for knowledge graph building
+text = """
+Elon Musk founded SpaceX in 2002. SpaceX is located in Hawthorne, California.
+SpaceX acquired Swarm Technologies in 2021. Many engineers work for SpaceX.
+"""
+
+schema = (extractor.create_schema()
+    .entities(["person", "organization", "location", "date"])
+    .relations({
+        "founded": "Founding relationship where person created organization",
+        "acquired": "Acquisition relationship where company bought another company",
+        "located_in": "Geographic relationship where entity is in a location",
+        "works_for": "Employment relationship where person works at organization"
+    })
+)
+
+results = extractor.extract(text, schema)
+# Output: {
+#     'entities': {
+#         'person': ['Elon Musk', 'engineers'],
+#         'organization': ['SpaceX', 'Swarm Technologies'],
+#         'location': ['Hawthorne, California'],
+#         'date': ['2002', '2021']
+#     },
+#     'relation_extraction': {
+#         'founded': [('Elon Musk', 'SpaceX')],
+#         'acquired': [('SpaceX', 'Swarm Technologies')],
+#         'located_in': [('SpaceX', 'Hawthorne, California')],
+#         'works_for': [('engineers', 'SpaceX')]
+#     }
 # }
 ```
 
